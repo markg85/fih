@@ -74,10 +74,12 @@ const downloadFile = async (url, hash) => {
     }
 }
 
-const addVariant = (metadata, imageMetadataObject, hash) => {
+const addVariant = (metadata, imageMetadataObject, hash, extension, filename) => {
     const newVariant = {
         cid: 'TODO: CID',
         hash: hash,
+        extension: extension,
+        filename: filename,
         width: imageMetadataObject.width,
         height: imageMetadataObject.height
     }
@@ -90,8 +92,8 @@ const flattenedVariants = (metadata) => {
     return [metadata.source, ...metadata.variants];
 }
 
-const variantFromTallestWithoutGrace = (tallestRequest, variants) => {
-    const result = variants.filter(variant => Math.max(variant.width, variant.height) == tallestRequest);
+const variantFromTallestWithoutGrace = (tallestRequest, extension, variants) => {
+    const result = variants.filter(variant => Math.max(variant.width, variant.height) == tallestRequest && variant.extension == extension);
     if (result == []) {
         return false;
     }
@@ -103,9 +105,9 @@ const getExistingVariant = (metadata, options) => {
 
     if (options?.tallestSide) {
         if (options?.gracePercentage) {
-            return variantFromTallestWithoutGrace(options.tallestSide, variants)
+            return variantFromTallestWithoutGrace(options.tallestSide, options.extension, variants)
         } else {
-            return variantFromTallestWithoutGrace(options.tallestSide, variants)
+            return variantFromTallestWithoutGrace(options.tallestSide, options.extension, variants)
         }
     }
 
@@ -115,6 +117,7 @@ const getExistingVariant = (metadata, options) => {
 fastify.post('/*', async (request, reply) => {
 
     let resultingHash = '';
+    let filename = null
     let options = {}
 
     try {
@@ -126,7 +129,7 @@ fastify.post('/*', async (request, reply) => {
          * {
          *    IMPLEMENTED - tallestSide: <number>                         // Defines that the requestor wants an image with the talles side this many pixels.
          *    TODO        - gracePercentage: <number 0-100>               // The requestor wants an image of X pixels (one of the pixel options) but doesn't care if the image is a bit bigger or smaller.
-         *    TODO        - width: <number>                               // Without graceperiod: returns an image with the exact width as requested. With grace, finds the image closest to it or creates it if it doesn't exist yet.
+         *    TODO        - width: <number>                               // Without gracePercentage: returns an image with the exact width as requested. With grace, finds the image closest to it or creates it if it doesn't exist yet.
          *    TODO        - height: <number>                              // Same as with only for the height.
          *                                                                // If both width and height are provided then the resulting image needs to fit in that size. Aspect ratio will always be mantained!
          *    IMPLEMENTED - ruturnImage: bool                             // False (default): True returns the (generated) image as response, false (default) return the hash of the (generated) image.
@@ -169,8 +172,17 @@ fastify.post('/*', async (request, reply) => {
         const existingVariant = getExistingVariant(metadata, options)
         if (existingVariant) {
             resultingHash = existingVariant.hash
+            filename = existingVariant.filename
             console.log(`Requested image matched existing images. Returned hash: ${resultingHash} (width: ${existingVariant.width}, height: ${existingVariant.height})`)
         } else {
+            if (!options?.extension) {
+                options.extension = 'avif'
+            }
+
+            if (['heif', 'avif'].includes(options.extension) == false) {
+                options.extension = 'avif'
+            }
+
             if (options?.tallestSide) {
                 if (sourceImageSharp == null) {
                     sourceImageSharp = sharp(path.join(IMAGEFOLDER, hash));
@@ -189,10 +201,16 @@ fastify.post('/*', async (request, reply) => {
         
                 try {
                     const destImage = sharp(newImageBuffer);
-                    await destImage.avif({ quality: 75 })
-                    .toFile(path.join(IMAGEFOLDER, resizedHash))
+                    filename = `${resizedHash}.${options.extension}`
+
+                    if (options.extension == 'avif') {
+                        await destImage.avif({ quality: 75 }).toFile(path.join(IMAGEFOLDER, filename))
+                    } else if (options.extension == 'heif') {
+                        await destImage.heif({ quality: 75, compression: 'hevc' }).toFile(path.join(IMAGEFOLDER, filename))
+                    }
+
                     resultingHash = resizedHash
-                    const newVariant = addVariant(metadata, await destImage.metadata(), resizedHash)
+                    const newVariant = addVariant(metadata, await destImage.metadata(), resizedHash, options.extension, filename)
 
                     console.log(`Created new variant image from hash ${hash}. New width: ${newVariant.width} and height: ${newVariant.height}`)
     
@@ -214,7 +232,7 @@ fastify.post('/*', async (request, reply) => {
         reply.header('Content-Type', 'image/avif')
         return reply.send(stream)
     } else {
-        return {hash: resultingHash}
+        return {hash: resultingHash, filename: filename}
     }
 })
 
