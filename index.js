@@ -168,21 +168,21 @@ fastify.post('/*', async (request, reply) => {
     
         // Handle the requested options.
         options = request.body;
-    
+
+        if (!options?.extension) {
+            options.extension = 'avif'
+        }
+
+        if (['heif', 'avif'].includes(options.extension) == false) {
+            options.extension = 'avif'
+        }
+        
         const existingVariant = getExistingVariant(metadata, options)
         if (existingVariant) {
             resultingHash = existingVariant.hash
             filename = existingVariant.filename
             console.log(`Requested image matched existing images. Returned hash: ${resultingHash} (width: ${existingVariant.width}, height: ${existingVariant.height})`)
         } else {
-            if (!options?.extension) {
-                options.extension = 'avif'
-            }
-
-            if (['heif', 'avif'].includes(options.extension) == false) {
-                options.extension = 'avif'
-            }
-
             if (options?.tallestSide) {
                 if (sourceImageSharp == null) {
                     sourceImageSharp = sharp(path.join(IMAGEFOLDER, hash));
