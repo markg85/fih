@@ -9,6 +9,8 @@ const PORT = process.env.PORT || 9090;
 const IMAGEFOLDER = `${require.main.path}/images`
 const METADATAFOLDER = `${require.main.path}/metadata`
 
+const pendingDownloads = new Set();
+
 const imageExistsByHash = async (hash) => {
     try {
         await fs.access(path.join(IMAGEFOLDER, hash))
@@ -18,19 +20,27 @@ const imageExistsByHash = async (hash) => {
     }
 }
 
-const metadataFile = async (hash) => {
-    const exists = async (hash) => {
+const touch = async (path) => {
+    return new Promise(async (resolve, reject) => {
         try {
-            await fs.access(path.join(METADATAFOLDER, `${hash}.json`))
-            return true;
+            await fs.access(path, fs.constants.R_OK | fs.constants.W_OK)
+            resolve()
+            return;
         } catch (error) {
-            return false;
+            // nothing. Not an "error" error...
         }
-    }
+        
+        await fs.writeFile(path, "{}")
+        resolve()
+        return;
+    });
+  };
 
+const metadataFile = async (hash) => {
     try {
-        await exists(METADATAFOLDER, hash)
-        const data = await fs.readFile(path.join(METADATAFOLDER, `${hash}.json`))
+        const filePath = path.join(METADATAFOLDER, `${hash}.json`)
+        await touch(filePath);
+        const data = await fs.readFile(filePath)
         let jsonData = JSON.parse(data)
         if (typeof jsonData == 'object') {
             return jsonData;
@@ -49,6 +59,7 @@ const saveMetadata = async (metadata, hash) => {
 const downloadFile = async (url, hash) => {
     let file = null;
     try {
+        pendingDownloads.add(hash);
         console.log(`Starting file download with url ${url} and hash ${hash}`)
         const response = await axios({
             method: 'GET',
@@ -71,6 +82,7 @@ const downloadFile = async (url, hash) => {
         throw new Error(error);
     } finally {
         file?.close()
+        pendingDownloads.delete(hash);
     }
 }
 
@@ -116,10 +128,54 @@ const getExistingVariant = (metadata, options) => {
     return metadata.source;
 }
 
+const handleProcessing = async (metadata, options) => {
+    const existingVariant = getExistingVariant(metadata, options)
+    const hash = metadata.source.hash;
+    if (existingVariant) {
+        console.log(`Requested image matched existing images. Returned hash: ${existingVariant.hash} (width: ${existingVariant.width}, height: ${existingVariant.height})`)
+        return {hash: existingVariant.hash, filename: existingVariant.filename}
+    } else {
+        if (options?.tallestSide) {
+            const sourceImageSharp = sharp(path.join(IMAGEFOLDER, hash));
+            const sourceImageMetadata = await sourceImageSharp.metadata();
+            let resizeOptions = {}
+            if (sourceImageMetadata.width > sourceImageMetadata.height) {
+                resizeOptions.width = options.tallestSide;
+            } else {
+                resizeOptions.height = options.tallestSide;
+            }
+    
+            const newImageBuffer = await sourceImageSharp.resize(resizeOptions).toBuffer()
+            const resizedHash = Buffer.from(blake3(newImageBuffer)).toString('hex')
+    
+            try {
+                const destImage = sharp(newImageBuffer);
+                filename = `${resizedHash}.${options.extension}`
+
+                if (options.extension == 'avif') {
+                    await destImage.avif({ quality: 75 }).toFile(path.join(IMAGEFOLDER, filename))
+                } else if (options.extension == 'heif') {
+                    await destImage.heif({ quality: 75, compression: 'hevc' }).toFile(path.join(IMAGEFOLDER, filename))
+                }
+
+                resultingHash = resizedHash
+                const newVariant = addVariant(metadata, await destImage.metadata(), resizedHash, options.extension, filename)
+                await saveMetadata(metadata, hash);
+                console.log(`Created new variant image from hash ${hash}. New width: ${newVariant.width} and height: ${newVariant.height}`)
+
+                return {hash: newVariant.hash, filename: newVariant.filename}
+            } catch (error) {
+                console.log(error)
+                return null;
+            }
+        }
+        return null;
+    }
+}
+
 fastify.post('/*', async (request, reply) => {
 
     let resultingHash = '';
-    let filename = null
     let options = {}
 
     try {
@@ -145,29 +201,7 @@ fastify.post('/*', async (request, reply) => {
     
         let metadata = null
         let sourceImageSharp = null
-    
-        // Handle the source file
-        try {
-            metadata = await metadataFile(hash);
-            
-            if (await imageExistsByHash(hash) == false) {
-                await downloadFile(url, hash)
-                sourceImageSharp = sharp(path.join(IMAGEFOLDER, hash))
-                const sourceMetadata = await sourceImageSharp.metadata()
-                metadata['source'] = {
-                    cid: 'TODO: CID',
-                    hash: hash,
-                    width: sourceMetadata.width,
-                    height: sourceMetadata.height
-                }
-                metadata['variants'] = []
-            }
-        } catch (error) {
-            console.log(`The requested URL could not be parsed as image. URL: ${url}`)
-            await fs.rm(path.join(IMAGEFOLDER, hash))
-            return reply.status(400).send({ status: "The requested URL could not be parsed as image." })
-        }
-    
+
         // Handle the requested options.
         options = request.body;
 
@@ -178,50 +212,39 @@ fastify.post('/*', async (request, reply) => {
         if (['heif', 'avif'].includes(options.extension) == false) {
             options.extension = 'avif'
         }
-        
-        const existingVariant = getExistingVariant(metadata, options)
-        if (existingVariant) {
-            resultingHash = existingVariant.hash
-            filename = existingVariant.filename
-            console.log(`Requested image matched existing images. Returned hash: ${resultingHash} (width: ${existingVariant.width}, height: ${existingVariant.height})`)
-        } else {
-            if (options?.tallestSide) {
-                if (sourceImageSharp == null) {
-                    sourceImageSharp = sharp(path.join(IMAGEFOLDER, hash));
-                }
-        
-                const sourceImageMetadata = await sourceImageSharp.metadata();
-                let resizeOptions = {}
-                if (sourceImageMetadata.width > sourceImageMetadata.height) {
-                    resizeOptions.width = options.tallestSide;
-                } else {
-                    resizeOptions.height = options.tallestSide;
-                }
-        
-                const newImageBuffer = await sourceImageSharp.resize(resizeOptions).toBuffer()
-                const resizedHash = Buffer.from(blake3(newImageBuffer)).toString('hex')
-        
-                try {
-                    const destImage = sharp(newImageBuffer);
-                    filename = `${resizedHash}.${options.extension}`
-
-                    if (options.extension == 'avif') {
-                        await destImage.avif({ quality: 75 }).toFile(path.join(IMAGEFOLDER, filename))
-                    } else if (options.extension == 'heif') {
-                        await destImage.heif({ quality: 75, compression: 'hevc' }).toFile(path.join(IMAGEFOLDER, filename))
-                    }
-
-                    resultingHash = resizedHash
-                    const newVariant = addVariant(metadata, await destImage.metadata(), resizedHash, options.extension, filename)
-
-                    console.log(`Created new variant image from hash ${hash}. New width: ${newVariant.width} and height: ${newVariant.height}`)
     
-                } catch (error) {
-                    console.log(error)
+        // Handle the source file
+        try {
+            metadata = await metadataFile(hash);
+            
+            if (await imageExistsByHash(hash) == false) {
+                if (pendingDownloads.has(hash)) {
+                    return reply.status(408).send({ status: "The download is in progress!" })
                 }
+
+                await downloadFile(url, hash);
+                sourceImageSharp = sharp(path.join(IMAGEFOLDER, hash))
+                const sourceMetadata = await sourceImageSharp.metadata()
+                metadata['source'] = {
+                    cid: 'TODO: CID',
+                    hash: hash,
+                    width: sourceMetadata.width,
+                    height: sourceMetadata.height
+                }
+                metadata['variants'] = []
             }
 
-            await saveMetadata(metadata, hash);
+            const returnData = await handleProcessing(metadata, options)
+
+            if (typeof returnData == 'object') {
+                return returnData;
+            } else {
+                return reply.status(408).send({ status: "The server has your image and tried to process it but failed." })
+            }
+        } catch (error) {
+            console.log(`The requested URL could not be parsed as image. URL: ${url}`)
+            await fs.rm(path.join(IMAGEFOLDER, hash))
+            return reply.status(400).send({ status: "The requested URL could not be parsed as image." })
         }
     
     } catch (error) {
@@ -234,7 +257,7 @@ fastify.post('/*', async (request, reply) => {
         reply.header('Content-Type', 'image/avif')
         return reply.send(stream)
     } else {
-        return {hash: resultingHash, filename: filename}
+        return reply.status(400).send({ status: "Don't know." })
     }
 })
 
