@@ -102,6 +102,8 @@ const variantFromTallestWithoutGrace = (tallestRequest, extension, variants) => 
 
 const getExistingVariant = (metadata, options) => {
     const variants = flattenedVariants(metadata)
+    // console.log(variants)
+    // console.log(options)
 
     if (options?.tallestSide) {
         if (options?.gracePercentage) {
@@ -111,7 +113,7 @@ const getExistingVariant = (metadata, options) => {
         }
     }
 
-    console.log(flattenedVariants)
+    return metadata.source;
 }
 
 fastify.post('/*', async (request, reply) => {
