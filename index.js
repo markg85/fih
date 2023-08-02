@@ -11,6 +11,10 @@ const METADATAFOLDER = `${require.main.path}/metadata`
 
 const pendingDownloads = new Set();
 
+function isEmptyObject(obj) {
+    return Object.keys(obj).length === 0;
+}
+
 const imageExistsByHash = async (hash) => {
     try {
         await fs.access(path.join(IMAGEFOLDER, hash))
@@ -128,7 +132,7 @@ const getExistingVariant = (metadata, options) => {
     return metadata.source;
 }
 
-const handleProcessing = async (metadata, options) => {
+const handleProcessing = async (metadata, options, sourceImageSharp) => {
     const existingVariant = getExistingVariant(metadata, options)
     
     if (existingVariant) {
@@ -138,7 +142,10 @@ const handleProcessing = async (metadata, options) => {
         const hash = metadata.source.hash;
 
         if (options?.tallestSide) {
-            const sourceImageSharp = sharp(path.join(IMAGEFOLDER, hash));
+            if (sourceImageSharp == null) {
+                sourceImageSharp = sharp(path.join(IMAGEFOLDER, hash));
+            }
+
             const sourceImageMetadata = await sourceImageSharp.metadata();
             let resizeOptions = {}
             if (sourceImageMetadata.width > sourceImageMetadata.height) {
@@ -160,7 +167,6 @@ const handleProcessing = async (metadata, options) => {
                     await destImage.heif({ quality: 75, compression: 'hevc' }).toFile(path.join(IMAGEFOLDER, filename))
                 }
 
-                resultingHash = resizedHash
                 const newVariant = addVariant(metadata, await destImage.metadata(), resizedHash, options.extension, filename)
                 await saveMetadata(metadata);
                 console.log(`Created new variant image from hash ${hash}. New width: ${newVariant.width} and height: ${newVariant.height}`)
@@ -177,7 +183,6 @@ const handleProcessing = async (metadata, options) => {
 
 fastify.post('/*', async (request, reply) => {
 
-    let resultingHash = '';
     let options = {}
 
     try {
@@ -216,7 +221,7 @@ fastify.post('/*', async (request, reply) => {
         const hash = Buffer.from(blake3(url)).toString('hex')
     
         // Handle the source file
-        metadata = await metadataFile(hash);
+        
             
         if (await imageExistsByHash(hash) == false) {
             if (pendingDownloads.has(hash)) {
@@ -224,6 +229,11 @@ fastify.post('/*', async (request, reply) => {
             }
 
             await downloadFile(url, hash);
+        }
+
+        metadata = await metadataFile(hash);
+
+        if (isEmptyObject(metadata)) {
             sourceImageSharp = sharp(path.join(IMAGEFOLDER, hash))
             const sourceMetadata = await sourceImageSharp.metadata()
             metadata['source'] = {
@@ -235,9 +245,9 @@ fastify.post('/*', async (request, reply) => {
             metadata['variants'] = []
         }
 
-        const returnData = await handleProcessing(metadata, options)
+        const returnData = await handleProcessing(metadata, options, sourceImageSharp)
 
-        if (typeof returnData == 'object') {
+        if (returnData != null || isEmptyObject(returnData) == false) {
             return returnData;
         } else {
             return reply.status(408).send({ status: "The server has your image and tried to process it but failed." })
@@ -248,16 +258,6 @@ fastify.post('/*', async (request, reply) => {
         console.log(`The requested URL could not be parsed as image. URL: ${url}`)
         await fs.rm(path.join(IMAGEFOLDER, hash))
         return reply.status(400).send({ status: "The requested URL could not be parsed as image." })
-
-    }
-
-    if (options?.ruturnImage == true) {
-        const file = await fs.open(path.join(IMAGEFOLDER, resultingHash), 'r')
-        const stream = file.createReadStream()
-        reply.header('Content-Type', 'image/avif')
-        return reply.send(stream)
-    } else {
-        return reply.status(400).send({ status: "Don't know." })
     }
 })
 
