@@ -52,8 +52,8 @@ const metadataFile = async (hash) => {
     return {}
 }
 
-const saveMetadata = async (metadata, hash) => {
-    return fs.writeFile(path.join(METADATAFOLDER, `${hash}.json`), JSON.stringify(metadata))
+const saveMetadata = async (metadata) => {
+    return fs.writeFile(path.join(METADATAFOLDER, `${metadata.source.hash}.json`), JSON.stringify(metadata))
 }
 
 const downloadFile = async (url, hash) => {
@@ -130,11 +130,13 @@ const getExistingVariant = (metadata, options) => {
 
 const handleProcessing = async (metadata, options) => {
     const existingVariant = getExistingVariant(metadata, options)
-    const hash = metadata.source.hash;
+    
     if (existingVariant) {
         console.log(`Requested image matched existing images. Returned hash: ${existingVariant.hash} (width: ${existingVariant.width}, height: ${existingVariant.height})`)
         return {hash: existingVariant.hash, filename: existingVariant.filename}
     } else {
+        const hash = metadata.source.hash;
+
         if (options?.tallestSide) {
             const sourceImageSharp = sharp(path.join(IMAGEFOLDER, hash));
             const sourceImageMetadata = await sourceImageSharp.metadata();
@@ -160,7 +162,7 @@ const handleProcessing = async (metadata, options) => {
 
                 resultingHash = resizedHash
                 const newVariant = addVariant(metadata, await destImage.metadata(), resizedHash, options.extension, filename)
-                await saveMetadata(metadata, hash);
+                await saveMetadata(metadata);
                 console.log(`Created new variant image from hash ${hash}. New width: ${newVariant.width} and height: ${newVariant.height}`)
 
                 return {hash: newVariant.hash, filename: newVariant.filename}
@@ -179,9 +181,6 @@ fastify.post('/*', async (request, reply) => {
     let options = {}
 
     try {
-        const url = request.params['*']
-        const hash = Buffer.from(blake3(url)).toString('hex')
-    
         /**
          * A body like this json can be provided:
          * {
@@ -212,43 +211,44 @@ fastify.post('/*', async (request, reply) => {
         if (['heif', 'avif'].includes(options.extension) == false) {
             options.extension = 'avif'
         }
+
+        const url = request.params['*']
+        const hash = Buffer.from(blake3(url)).toString('hex')
     
         // Handle the source file
-        try {
-            metadata = await metadataFile(hash);
+        metadata = await metadataFile(hash);
             
-            if (await imageExistsByHash(hash) == false) {
-                if (pendingDownloads.has(hash)) {
-                    return reply.status(408).send({ status: "The download is in progress!" })
-                }
-
-                await downloadFile(url, hash);
-                sourceImageSharp = sharp(path.join(IMAGEFOLDER, hash))
-                const sourceMetadata = await sourceImageSharp.metadata()
-                metadata['source'] = {
-                    cid: 'TODO: CID',
-                    hash: hash,
-                    width: sourceMetadata.width,
-                    height: sourceMetadata.height
-                }
-                metadata['variants'] = []
+        if (await imageExistsByHash(hash) == false) {
+            if (pendingDownloads.has(hash)) {
+                return reply.status(408).send({ status: "The download is in progress!" })
             }
 
-            const returnData = await handleProcessing(metadata, options)
-
-            if (typeof returnData == 'object') {
-                return returnData;
-            } else {
-                return reply.status(408).send({ status: "The server has your image and tried to process it but failed." })
+            await downloadFile(url, hash);
+            sourceImageSharp = sharp(path.join(IMAGEFOLDER, hash))
+            const sourceMetadata = await sourceImageSharp.metadata()
+            metadata['source'] = {
+                cid: 'TODO: CID',
+                hash: hash,
+                width: sourceMetadata.width,
+                height: sourceMetadata.height
             }
-        } catch (error) {
-            console.log(`The requested URL could not be parsed as image. URL: ${url}`)
-            await fs.rm(path.join(IMAGEFOLDER, hash))
-            return reply.status(400).send({ status: "The requested URL could not be parsed as image." })
+            metadata['variants'] = []
+        }
+
+        const returnData = await handleProcessing(metadata, options)
+
+        if (typeof returnData == 'object') {
+            return returnData;
+        } else {
+            return reply.status(408).send({ status: "The server has your image and tried to process it but failed." })
         }
     
     } catch (error) {
         console.log(error)
+        console.log(`The requested URL could not be parsed as image. URL: ${url}`)
+        await fs.rm(path.join(IMAGEFOLDER, hash))
+        return reply.status(400).send({ status: "The requested URL could not be parsed as image." })
+
     }
 
     if (options?.ruturnImage == true) {
