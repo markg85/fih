@@ -227,7 +227,7 @@ fastify.post('/*', async (request, reply) => {
             let resizeOptions = {}
 
             if (options?.tallestSide) {
-                const sourceMetadata = sourceImageSharp.metadata();
+                const sourceMetadata = await sourceImageSharp.metadata();
                 if (sourceMetadata.width > sourceMetadata.height) {
                     resizeOptions.width = options.tallestSide;
                 } else {
